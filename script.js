@@ -1,5 +1,5 @@
 // State Management
-let tasks = JSON.parse(localStorage.getItem('tasks')) || [];
+let tasks = [];
 let activeFilter = 'all';
 
 // DOM Elements
@@ -24,9 +24,9 @@ const toastContainer = document.getElementById('toastContainer');
 const CIRCUMFERENCE = 2 * Math.PI * 24;
 
 // Initialize Application
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     initDateAndGreeting();
-    renderTasks();
+    await loadTasks();
     setupEventListeners();
 });
 
@@ -74,6 +74,23 @@ function setupEventListeners() {
 
     // Clear Completed Button
     clearCompletedBtn.addEventListener('click', clearCompletedTasks);
+}
+
+// Fetch tasks from the backend
+async function loadTasks() {
+    try {
+        const response = await fetch('/api/tasks');
+        if (response.ok) {
+            tasks = await response.json();
+        } else {
+            throw new Error('Server returned error status');
+        }
+    } catch (error) {
+        console.error('Error fetching tasks from server:', error);
+        showToast('Offline mode: Using local storage.', 'info');
+        tasks = JSON.parse(localStorage.getItem('tasks')) || [];
+    }
+    renderTasks();
 }
 
 // Render Tasks based on state and filters
@@ -141,35 +158,61 @@ function renderTasks() {
 }
 
 // Add Task
-function addTask() {
+async function addTask() {
     const title = taskInput.value.trim();
     if (!title) return;
 
-    const newTask = {
-        id: Date.now().toString(),
+    const payload = {
         title: title,
         category: taskCategory.value,
-        priority: taskPriority.value,
-        completed: false,
-        createdAt: new Date().toISOString()
+        priority: taskPriority.value
     };
 
-    tasks.unshift(newTask);
-    saveToLocalStorage();
-    renderTasks();
-    
-    // Reset Form Input
-    taskInput.value = '';
-    taskInput.focus();
-    
-    showToast('Task added successfully!', 'success');
+    try {
+        const response = await fetch('/api/tasks', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) throw new Error('Failed to save task to server');
+        const newTask = await response.json();
+        tasks.unshift(newTask);
+        saveToLocalStorage();
+        renderTasks();
+
+        // Reset Form Input
+        taskInput.value = '';
+        taskInput.focus();
+
+        showToast('Task added successfully!', 'success');
+    } catch (error) {
+        console.error(error);
+        showToast('Failed to add task to server.', 'danger');
+    }
 }
 
 // Toggle Completed State
-window.toggleTaskComplete = function(id) {
+window.toggleTaskComplete = async function(id) {
     const task = tasks.find(t => t.id === id);
-    if (task) {
-        task.completed = !task.completed;
+    if (!task) return;
+
+    const newCompletedState = !task.completed;
+
+    try {
+        const response = await fetch(`/api/tasks/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ completed: newCompletedState })
+        });
+
+        if (!response.ok) throw new Error('Failed to update task');
+        const updatedTask = await response.json();
+        task.completed = updatedTask.completed;
         saveToLocalStorage();
         renderTasks();
 
@@ -178,11 +221,15 @@ window.toggleTaskComplete = function(id) {
         } else {
             showToast('Task marked as active.', 'info');
         }
+    } catch (error) {
+        console.error(error);
+        showToast('Failed to update task on server.', 'danger');
+        renderTasks(); // Revert checkmark state in view
     }
 };
 
 // Edit Task Title
-window.editTask = function(id) {
+window.editTask = async function(id) {
     const task = tasks.find(t => t.id === id);
     if (!task) return;
 
@@ -197,47 +244,81 @@ window.editTask = function(id) {
         return;
     }
 
-    task.title = trimmedTitle;
-    saveToLocalStorage();
-    renderTasks();
-    showToast('Task updated successfully!', 'success');
+    try {
+        const response = await fetch(`/api/tasks/${id}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ title: trimmedTitle })
+        });
+
+        if (!response.ok) throw new Error('Failed to edit task');
+        const updatedTask = await response.json();
+        task.title = updatedTask.title;
+        saveToLocalStorage();
+        renderTasks();
+        showToast('Task updated successfully!', 'success');
+    } catch (error) {
+        console.error(error);
+        showToast('Failed to edit task on server.', 'danger');
+    }
 };
 
 // Delete Task
-window.deleteTask = function(id) {
+window.deleteTask = async function(id) {
     const taskIndex = tasks.findIndex(t => t.id === id);
     if (taskIndex === -1) return;
 
     const taskElement = document.querySelector(`[data-id="${id}"]`);
-    if (taskElement) {
-        taskElement.classList.add('removing');
-        // Wait for the exit transition to finish before removing from DOM/state
-        setTimeout(() => {
+    
+    const performDelete = async () => {
+        try {
+            const response = await fetch(`/api/tasks/${id}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) throw new Error('Failed to delete task');
             tasks.splice(taskIndex, 1);
             saveToLocalStorage();
             renderTasks();
             showToast('Task deleted.', 'danger');
-        }, 300);
+        } catch (error) {
+            console.error(error);
+            showToast('Failed to delete task from server.', 'danger');
+        }
+    };
+
+    if (taskElement) {
+        taskElement.classList.add('removing');
+        // Wait for the exit transition to finish before removing from DOM/state
+        setTimeout(performDelete, 300);
     } else {
-        tasks.splice(taskIndex, 1);
-        saveToLocalStorage();
-        renderTasks();
-        showToast('Task deleted.', 'danger');
+        await performDelete();
     }
 };
 
 // Clear all completed tasks
-function clearCompletedTasks() {
-    const initialLength = tasks.length;
-    tasks = tasks.filter(t => !t.completed);
-    const clearedCount = initialLength - tasks.length;
+async function clearCompletedTasks() {
+    const completedCount = tasks.filter(t => t.completed).length;
+    if (completedCount === 0) {
+        showToast('No completed tasks to clear.', 'info');
+        return;
+    }
 
-    if (clearedCount > 0) {
+    try {
+        const response = await fetch('/api/tasks/clear-completed', {
+            method: 'POST'
+        });
+
+        if (!response.ok) throw new Error('Failed to clear tasks');
+        tasks = tasks.filter(t => !t.completed);
         saveToLocalStorage();
         renderTasks();
-        showToast(`Cleared ${clearedCount} completed task(s).`, 'danger');
-    } else {
-        showToast('No completed tasks to clear.', 'info');
+        showToast(`Cleared ${completedCount} completed task(s).`, 'danger');
+    } catch (error) {
+        console.error(error);
+        showToast('Failed to clear completed tasks from server.', 'danger');
     }
 }
 
@@ -261,7 +342,7 @@ function updateStats() {
     progressCircle.style.strokeDashoffset = offset;
 }
 
-// Utility: Save tasks state to localStorage
+// Utility: Save tasks state to localStorage (offline sync)
 function saveToLocalStorage() {
     localStorage.setItem('tasks', JSON.stringify(tasks));
 }
